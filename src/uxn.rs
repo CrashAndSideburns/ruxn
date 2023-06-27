@@ -1,5 +1,4 @@
-use std::error::Error;
-use std::ops::{Index, IndexMut};
+use std::ops::IndexMut;
 
 type Result<T> = std::result::Result<T, UxnError>;
 
