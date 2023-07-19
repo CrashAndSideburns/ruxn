@@ -10,7 +10,7 @@ type Result<T> = std::result::Result<T, UxnError>;
 /// occurs in one of the stacks of the Uxn stack-machine. In particular, it is not detailed whether
 /// or not the *program counter* is allowed to underflow or overflow. This does not currently raise
 /// an error, but this is subject to change if the specification is clarified.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum UxnError {
     Underflow,
     Overflow,
@@ -22,7 +22,12 @@ pub enum UxnError {
 /// [here](https://wiki.xxiivv.com/site/uxntal_stacks.html).
 #[derive(Debug)]
 pub struct UxnStack {
-    s: [u8; 0xff],
+    // HACK: Giving s a capacity of 256 rather than 255 is a bit of a silly hack which gives quite
+    // a few benefits. Since sp points to the location on the stack where the next byte will be
+    // placed, we can tell that the stack is at capacity simply by checking whether or not
+    // incrementing sp would cause an overflow. It also means that indexing sp with a u8 is always
+    // valid, so we can dispense with bounds-checking and use get_unchecked.
+    s: [u8; 0x100],
     sp: u8,
 }
 
@@ -30,362 +35,87 @@ impl UxnStack {
     /// Constructs a new, empty [`UxnStack`].
     pub fn new() -> Self {
         UxnStack {
-            s: [0x00; 0xff],
+            s: [0x00; 0x100],
             sp: 0,
         }
     }
 
-    /// Return the byte at index `offset` on the stack if there are at least `offset` bytes on the
-    /// stack. Calling with `offset == 0` results in undefined behaviour.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x02).unwrap();
-    /// stack.push(0x01).unwrap();
-    /// 
-    /// assert_eq!(Ok(0x01), stack.get(1));
-    /// assert_eq!(Ok(0x02), stack.get(2));
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x00).unwrap();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.get(2));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Underflow`](self::UxnError#variant.Underflow) if there are fewer than
-    /// `offset` bytes on the stack.
-    ///
-    /// # Panics
-    ///
-    /// May panic if called with `offset == 0`.
-    pub fn get(&self, offset: u8) -> Result<u8> {
-        let index = self.sp.checked_sub(offset).ok_or(UxnError::Underflow)?;
-        Ok(self.s[index as usize])
-    }
+    // TODO: Write proper documentation.
+    fn update_stack_pointer(
+        &mut self,
+        operand_bytes: u8,
+        result_bytes: u8,
+        keep_mode: bool,
+    ) -> Result<()> {
+        // Check that there are enough bytes on the stack to perform the operation.
+        if operand_bytes > self.sp {
+            return Err(UxnError::Underflow);
+        }
 
-    /// Return the short with LSB at index `offset` on the stack if there are at least `offset+1`
-    /// bytes on the stack. Calling with `offset == 0` results in undefined behaviour.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x03).unwrap();
-    /// stack.push(0x02).unwrap();
-    /// stack.push(0x01).unwrap();
-    ///
-    /// assert_eq!(Ok(0x0201), stack.get2(1));
-    /// assert_eq!(Ok(0x0302), stack.get2(2));
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x00).unwrap();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.get2(2));
-    /// assert_eq!(Err(UxnError::Underflow), stack.get2(1));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Underflow`](self::UxnError#variant.Underflow) if there are fewer than
-    /// `offset+1` bytes on the stack.
-    ///
-    /// # Panics
-    ///
-    /// May panic if called with `offset == 0`.
-    pub fn get2(&self, offset: u8) -> Result<u16> {
-        let msb = self.get(offset.checked_add(1).ok_or(UxnError::Underflow)?)?;
-        // We can be a bit cavalier about checking for errors here. If we got to this point, we
-        // know that self.sp - offset does not underflow and is a good index.
-        let lsb = self.s[(self.sp - offset) as usize];
-        Ok(u16::from_be_bytes([msb, lsb]))
-    }
+        // Compute the new stack pointer. If keep_mode is true, then we expect result_bytes to be
+        // pushed to the stack. If keep_mode is false, then we expect operand_bytes to be popped
+        // from the stack, and then for result_bytes to be pushed to the stack.
+        let new_sp = if keep_mode {
+            self.sp
+        } else {
+            // The subtraction of operand_bytes does not need to be checked, as we have already
+            // checked that operand_bytes <= sp.
+            self.sp.wrapping_sub(operand_bytes)
+        }
+        .checked_add(result_bytes)
+        .ok_or(UxnError::Overflow)?;
 
-    /// Set the byte at index `offset` on the stack to `value` if there are at least `offset`
-    /// bytes on the stack. If `offset == 0`, `value` will be placed on top of the stack if
-    /// it is not full, but the stack pointer will not be incremented.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x02).unwrap();
-    /// stack.push(0x01).unwrap();
-    ///
-    /// assert_eq!(Ok(()), stack.set(2, 0x03));
-    /// assert_eq!(Ok(0x03), stack.get(2));
-    ///
-    /// assert_eq!(Ok(()), stack.set(0, 0x00));
-    /// assert_eq!(Ok(0x01), stack.pop());
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x00).unwrap();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.set(2, 0x01));
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// for _ in 0x00..0xff {
-    ///     stack.push(0x00).unwrap();
-    /// }
-    ///
-    /// assert_eq!(Err(UxnError::Overflow), stack.set(0, 0x01));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Underflow`](self::UxnError#variant.Underflow) if there are fewer than
-    /// `offset` bytes on the stack. Returns
-    /// [`UxnError::Overflow`](self::UxnError#variant.Overflow) if the stack is full and `offset ==
-    /// 0`. In either case, the stack remains unmodified.
-    pub fn set(&mut self, offset: u8, value: u8) -> Result<()> {
-        *self
-            .s
-            .get_mut(self.sp.checked_sub(offset).ok_or(UxnError::Underflow)? as usize)
-            .ok_or(UxnError::Overflow)? = value;
+        self.sp = new_sp;
+
         Ok(())
     }
 
-    /// Set the short with LSB at index `offset` on the stack to `value` if there are at least
-    /// `offset+1` bytes on the stack. If `offset == 0`, `value` will be placed on top of the stack
-    /// if it has room for at least two more bytes, but the stack pointer will not be incremented.
-    ///
-    /// # Examples
-    /// 
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push2(0x0302).unwrap();
-    /// stack.push(0x01).unwrap();
-    ///
-    /// assert_eq!(Ok(()), stack.set2(1, 0x0504));
-    /// assert_eq!(Ok(0x0504), stack.get2(1));
-    /// assert_eq!(Ok(0x0305), stack.get2(2));
-    ///
-    /// assert_eq!(Ok(()), stack.set(0, 0x0000));
-    /// assert_eq!(Ok(0x0504), stack.pop2());
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x00).unwrap();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.set2(1, 0x01));
-    /// assert_eq!(Err(UxnError::Underflow), stack.set2(2, 0x01));
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// for _ in 0x00..0xfe {
-    ///     stack.push(0x00).unwrap();
-    /// }
-    ///
-    /// assert_eq!(Err(UxnError::Overflow), stack.set2(0, 0x0102));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Underflow`](self::UxnError#variant.Underflow) if there are fewer than
-    /// `offset+1` bytes on the stack. Returns
-    /// [`UxnError::Overflow`](self::UxnError#variant.Overflow) if the stack does not have room for
-    /// two more bytes and `offset == 0`. In either case, the stack remains unmodified.
-    pub fn set2(&mut self, offset: u8, value: u16) -> Result<()> {
+    // TODO: Write proper documentation.
+    fn get(&self, offset: u8) -> u8 {
+        unsafe {
+            // This never fails, because the index is guaranteed to be in the range 0..=255.
+            *self.s.get_unchecked(self.sp.wrapping_sub(offset) as usize)
+        }
+    }
+
+    // TODO: Write proper documentation.
+    fn get2(&self, offset: u8) -> u16 {
+        let msb = self.get(offset.wrapping_add(1));
+        let lsb = self.get(offset);
+        u16::from_be_bytes([msb, lsb])
+    }
+
+    // TODO: Write proper documentation.
+    fn set(&mut self, offset: u8, value: u8) {
+        unsafe {
+            *self
+                .s
+                .get_unchecked_mut(self.sp.wrapping_sub(offset) as usize) = value;
+        }
+    }
+
+    // TODO: Write proper documentation.
+    fn set2(&mut self, offset: u8, value: u16) {
         let value = value.to_be_bytes();
         let msb = value[0];
         let lsb = value[1];
-        if offset == 0 {
-            *self.s.get_mut(self.sp.checked_add(1).ok_or(UxnError::Overflow)? as usize).ok_or(UxnError::Overflow)? = lsb;
-            // We can be a bit cavalier about checking for errors here. If we got to this point, we
-            // know that self.sp is a good index.
-            self.s[self.sp as usize] = msb;
-        } else {
-            self.set(offset.checked_add(1).ok_or(UxnError::Underflow)?, msb)?;
-            // We can be a bit cavalier about checking for errors here. If we got to this point, we
-            // know that self.sp - offset does not underflow and is a good index.
-            self.s[(self.sp - offset) as usize] = lsb;
-        }
-        Ok(())
+        self.set(offset.wrapping_add(1), msb);
+        self.set(offset, lsb);
     }
 
-    /// Pop a byte from the stack if it is not empty.
-    ///
-    /// # Examples
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push(0x01).unwrap();
-    ///
-    /// assert_eq!(Ok(0x01), stack.pop());
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.pop());
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Underflow`](self::UxnError#variant.Underflow) if the stack is already
-    /// empty, in which case it remains unmodified.
-    pub fn pop(&mut self) -> Result<u8> {
-        let value = self.get(1)?;
-        self.sp -= 1;
-        Ok(value)
-    }
-
-    /// Pop a short from the stack if there are at least two bytes on the stack.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    /// stack.push2(0x0102).unwrap();
-    ///
-    /// assert_eq!(Ok(0x0102), stack.pop2());
-    ///
-    /// stack.push(0x01).unwrap();
-    /// stack.push(0x02).unwrap();
-    ///
-    /// assert_eq!(Ok(0x0102), stack.pop2());
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.pop2());
-    ///
-    /// stack.push(0x01).unwrap();
-    ///
-    /// assert_eq!(Err(UxnError::Underflow), stack.pop2());
-    /// assert_eq!(Ok(0x01), stack.pop());
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Underflow`](self::UxnError#variant.Underflow) if the stack does not
-    /// contain at least two bytes, in which case it remains unmodified.
-    pub fn pop2(&mut self) -> Result<u16> {
-        let value = self.get2(1)?;
-        self.sp -= 2;
-        Ok(value)
-    }
-
-    /// Pushes a byte onto the stack if it is not full.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    ///
-    /// assert_eq!(Ok(()), stack.push(0x01));
-    /// assert_eq!(Ok(0x01), stack.pop());
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// for _ in 0x00..0xff {
-    ///     stack.push(0x01).unwrap();
-    /// }
-    ///
-    /// assert_eq!(Err(UxnError::Overflow), stack.push(0x02));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Overflow`](self::UxnError#variant.Overflow) if the stack is full, in
-    /// which case it remains unmodified.
-    pub fn push(&mut self, value: u8) -> Result<()> {
-        self.set(0, value)?;
-        self.sp += 1;
-        Ok(())
-    }
-
-    /// Pushes a short onto the stack if it has room for at least two more bytes.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruxn::uxn::UxnStack;
-    ///
-    /// let mut stack = UxnStack::new();
-    ///
-    /// assert_eq!(Ok(()), stack.push2(0x0102));
-    /// assert_eq!(Ok(0x02), stack.pop());
-    /// assert_eq!(Ok(0x01), stack.pop());
-    /// ```
-    ///
-    /// ```
-    /// use ruxn::uxn::{UxnStack, UxnError};
-    ///
-    /// let mut stack = UxnStack::new();
-    /// for _ in 0x00..0xfe {
-    ///     stack.push(0x01).unwrap();
-    /// }
-    ///
-    /// assert_eq!(Err(UxnError::Overflow), stack.push2(0x0203));
-    /// assert_eq!(Ok(0x01), stack.pop());
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UxnError::Overflow`](self::UxnError#variant.Overflow) if the stack does not have
-    /// room for two more bytes, in which case it remains unmodified.
-    pub fn push2(&mut self, value: u16) -> Result<()> {
-        self.set2(0, value)?;
-        self.sp += 2;
-        Ok(())
-    }
+    // TODO: UxnStack should probably have a saner set of methods. Someone using the Uxn struct may
+    // conceivably want to interact with the CPU's internal stacks, so they should have a more
+    // extensive and well-thought-out interfact.
 }
 
 pub struct Uxn<T> {
     pub ram: T,
-    pc: u16,
-    ws: UxnStack,
-    rs: UxnStack,
+    pub pc: u16,
+    pub ws: UxnStack,
+    pub rs: UxnStack,
 
-    // TODO: I'm not sure how I want devices to work for now. This is mostly a placeholder.
-    devices: [u8; 256],
+    // TODO: I'm not sure how I want devices to work for now. This is just a placeholder.
+    pub devices: [u8; 256],
 }
 
 impl<T> Uxn<T>
@@ -393,14 +123,569 @@ where
     T: IndexMut<u16, Output = u8>,
 {
     pub fn new(ram: T) -> Self {
-        todo!();
+        Uxn {
+            ram,
+            pc: 0x0100,
+            ws: UxnStack::new(),
+            rs: UxnStack::new(),
+
+            devices: [0x00; 256],
+        }
     }
 
-    fn step(&mut self) -> Result<()> {
-        todo!();
+    fn step(&mut self) -> Result<bool> {
+        // Fetch instruction and increment program counter.
+        let instruction = self.ram[self.pc];
+        self.pc = self.pc.wrapping_add(1);
+
+        // Some useful boolean flags.
+        let keep_mode = (instruction & 0b10000000) != 0;
+        let return_mode = (instruction & 0b01000000) != 0;
+        let immediate = (instruction & 0b00011111) == 0;
+
+        // In almost all cases (with the exception of JSR, STH, and JSI), the stack upon which we
+        // operate depends only on whether or not the opcode specifies return mode.
+        let stack = if return_mode {
+            &mut self.rs
+        } else {
+            &mut self.ws
+        };
+
+        // Mask off the keep and return mode bits of the instruction, leaving only the short mode
+        // and opcode bits. We only want to apply this mask if the instruction is not an immediate
+        // instruction, as if it is immediate then all of the bits are necessary to identify the
+        // instruction.
+        let masked_instruction = if immediate {
+            instruction
+        } else {
+            instruction & 0b00111111
+        };
+
+        // For the sake of avoiding repetition in the match statement, it is worth defining the
+        // stack variables upon which we will be operating here. The names for these variables are
+        // taken from the reference Uxn implementation at
+        // https://git.sr.ht/~rabbits/uxn11/blob/main/src/uxn.c.
+        // FIXME: These variable names should be changed at some point. They are not good.
+        let t = stack.get(1);
+        let n = stack.get(2);
+        let l = stack.get(3);
+        let h2 = stack.get2(2);
+        let t2 = stack.get2(1);
+        let n2 = stack.get2(3);
+        let l2 = stack.get2(5);
+
+        // HACK: There are definitely some things here that could be tidier.
+        match masked_instruction {
+            // Immediate instructions.
+
+            // BRK
+            0x00 => {
+                return Ok(true);
+            }
+
+            // JCI
+            0x20 => {
+                let msb = self.ram[self.pc];
+                let lsb = self.ram[self.pc.wrapping_add(1)];
+                self.pc = self.pc.wrapping_add(2);
+                stack.update_stack_pointer(1, 0, false)?;
+                if t != 0 {
+                    self.pc = self.pc.wrapping_add(u16::from_be_bytes([msb, lsb]));
+                }
+            }
+
+            // JMI
+            0x40 => {
+                let msb = self.ram[self.pc];
+                let lsb = self.ram[self.pc.wrapping_add(1)];
+                self.pc = self.pc.wrapping_add(2);
+                self.pc = self.pc.wrapping_add(u16::from_be_bytes([msb, lsb]));
+            }
+
+            // JSI
+            0x60 => {
+                let msb = self.ram[self.pc];
+                let lsb = self.ram[self.pc.wrapping_add(1)];
+                self.pc = self.pc.wrapping_add(2);
+                self.rs.update_stack_pointer(0, 2, false)?;
+                self.rs.set2(1, self.pc);
+                self.pc = self.pc.wrapping_add(u16::from_be_bytes([msb, lsb]));
+            }
+
+            // LIT
+            0x80 => {
+                stack.update_stack_pointer(0, 1, true)?;
+                stack.set(1, self.ram[self.pc]);
+                self.pc = self.pc.wrapping_add(1);
+            }
+
+            // LIT2
+            0xa0 => {
+                stack.update_stack_pointer(0, 2, true)?;
+                let msb = self.ram[self.pc];
+                let lsb = self.ram[self.pc.wrapping_add(1)];
+                stack.set2(1, u16::from_be_bytes([msb, lsb]));
+                self.pc = self.pc.wrapping_add(2);
+            }
+
+            // LITr
+            0xc0 => {
+                stack.update_stack_pointer(0, 1, true)?;
+                stack.set(1, self.ram[self.pc]);
+                self.pc = self.pc.wrapping_add(1);
+            }
+
+            // LIT2r
+            0xe0 => {
+                stack.update_stack_pointer(0, 2, true)?;
+                let msb = self.ram[self.pc];
+                let lsb = self.ram[self.pc.wrapping_add(1)];
+                stack.set2(1, u16::from_be_bytes([msb, lsb]));
+                self.pc = self.pc.wrapping_add(2);
+            }
+
+            // Non-immediate instructions.
+
+            // INC(2)
+            0x01 => {
+                stack.update_stack_pointer(1, 1, keep_mode)?;
+                stack.set(1, t + 1);
+            }
+            0x21 => {
+                stack.update_stack_pointer(2, 2, keep_mode)?;
+                stack.set2(1, t2 + 1);
+            }
+
+            // POP(2)
+            0x02 => {
+                stack.update_stack_pointer(1, 0, keep_mode)?;
+            }
+            0x22 => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+            }
+
+            // NIP(2)
+            0x03 => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, t);
+            }
+            0x23 => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, t2);
+            }
+
+            // SWP(2)
+            0x04 => {
+                stack.update_stack_pointer(2, 2, keep_mode)?;
+                stack.set(1, n);
+                stack.set(2, t);
+            }
+            0x24 => {
+                stack.update_stack_pointer(4, 4, keep_mode)?;
+                stack.set2(1, n2);
+                stack.set2(3, t2);
+            }
+
+            // ROT(2)
+            0x05 => {
+                stack.update_stack_pointer(3, 3, keep_mode)?;
+                stack.set(1, l);
+                stack.set(2, t);
+                stack.set(3, n);
+            }
+            0x25 => {
+                stack.update_stack_pointer(6, 6, keep_mode)?;
+                stack.set2(1, l2);
+                stack.set2(3, t2);
+                stack.set2(5, n2);
+            }
+
+            // DUP(2)
+            0x06 => {
+                stack.update_stack_pointer(1, 2, keep_mode)?;
+                stack.set(1, t);
+                stack.set(2, t);
+            }
+            0x26 => {
+                stack.update_stack_pointer(2, 4, keep_mode)?;
+                stack.set2(1, t2);
+                stack.set2(3, t2);
+            }
+
+            // OVR(2)
+            0x07 => {
+                stack.update_stack_pointer(2, 3, keep_mode)?;
+                stack.set(1, n);
+                stack.set(2, t);
+                stack.set(3, n);
+            }
+            0x27 => {
+                stack.update_stack_pointer(4, 6, keep_mode)?;
+                stack.set2(1, n2);
+                stack.set2(3, t2);
+                stack.set2(5, n2);
+            }
+
+            // EQU(2)
+            0x08 => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, (n == t).into());
+            }
+            0x28 => {
+                stack.update_stack_pointer(4, 1, keep_mode)?;
+                stack.set(1, (n2 == t2).into());
+            }
+
+            // NEQ(2)
+            0x09 => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, (n != t).into());
+            }
+            0x29 => {
+                stack.update_stack_pointer(4, 1, keep_mode)?;
+                stack.set(1, (n2 != t2).into());
+            }
+
+            // GTH(2)
+            0x0a => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, (n > t).into());
+            }
+            0x2a => {
+                stack.update_stack_pointer(4, 1, keep_mode)?;
+                stack.set(1, (n2 > t2).into());
+            }
+
+            // LTH(2)
+            0x0b => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, (n < t).into());
+            }
+            0x2b => {
+                stack.update_stack_pointer(4, 1, keep_mode)?;
+                stack.set(1, (n2 < t2).into());
+            }
+
+            // JMP(2)
+            0x0c => {
+                stack.update_stack_pointer(1, 0, keep_mode)?;
+                self.pc = self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into());
+            }
+            0x2c => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                self.pc = t2;
+            }
+
+            // JCN(2)
+            0x0d => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                if n != 0 {
+                    self.pc = self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into());
+                }
+            }
+            0x2d => {
+                stack.update_stack_pointer(3, 0, keep_mode)?;
+                if l != 0 {
+                    self.pc = t2;
+                }
+            }
+
+            // JSR(2)
+            0x0e => {
+                stack.update_stack_pointer(1, 0, keep_mode)?;
+                self.rs.update_stack_pointer(0, 2, false)?;
+                self.rs.set2(1, self.pc);
+                self.pc = self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into());
+            }
+            0x2e => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                self.rs.update_stack_pointer(0, 2, false)?;
+                self.rs.set2(1, self.pc);
+                self.pc = t2
+            }
+
+            // STH(2)
+            0x0f => {
+                stack.update_stack_pointer(1, 0, keep_mode)?;
+                let other_stack = if return_mode {
+                    &mut self.ws
+                } else {
+                    &mut self.rs
+                };
+                other_stack.update_stack_pointer(0, 1, false)?;
+                other_stack.set(1, t);
+            }
+            0x2f => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                let other_stack = if return_mode {
+                    &mut self.ws
+                } else {
+                    &mut self.rs
+                };
+                other_stack.update_stack_pointer(0, 2, false)?;
+                other_stack.set2(1, t2);
+            }
+
+            // LDZ(2)
+            0x10 => {
+                stack.update_stack_pointer(1, 1, keep_mode)?;
+                stack.set(1, self.ram[t.into()]);
+            }
+            0x30 => {
+                stack.update_stack_pointer(1, 2, keep_mode)?;
+                stack.set(1, self.ram[t.wrapping_add(1).into()]);
+                stack.set(2, self.ram[t.into()]);
+            }
+
+            // STZ(2)
+            0x11 => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                self.ram[t.into()] = n;
+            }
+            0x31 => {
+                stack.update_stack_pointer(3, 0, keep_mode)?;
+                self.ram[t.wrapping_add(1).into()] = n;
+                self.ram[t.into()] = l;
+            }
+
+            // LDR(2)
+            0x12 => {
+                stack.update_stack_pointer(1, 1, keep_mode)?;
+                stack.set(
+                    1,
+                    self.ram[self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into())],
+                );
+            }
+            0x32 => {
+                stack.update_stack_pointer(1, 2, keep_mode)?;
+                stack.set(
+                    1,
+                    self.ram[self
+                        .pc
+                        .wrapping_add_signed(i8::from_be_bytes([t]).into())
+                        .wrapping_add(1)],
+                );
+                stack.set(
+                    2,
+                    self.ram[self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into())],
+                );
+            }
+
+            // STR(2)
+            0x13 => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                self.ram[self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into())] = n;
+            }
+            0x33 => {
+                stack.update_stack_pointer(3, 0, keep_mode)?;
+                self.ram[self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into())] = l;
+                self.ram[self
+                    .pc
+                    .wrapping_add_signed(i8::from_be_bytes([t]).into())
+                    .wrapping_add(1)] = n;
+            }
+
+            // LDA(2)
+            0x14 => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, self.ram[t2]);
+            }
+            0x34 => {
+                stack.update_stack_pointer(2, 2, keep_mode)?;
+                stack.set(1, self.ram[t2.wrapping_add(1)]);
+                stack.set(2, self.ram[t2]);
+            }
+
+            // STA(2)
+            0x15 => {
+                stack.update_stack_pointer(3, 0, keep_mode)?;
+                self.ram[t2] = l;
+            }
+            0x35 => {
+                stack.update_stack_pointer(4, 0, keep_mode)?;
+                let value = n2.to_be_bytes();
+                self.ram[t2] = value[0];
+                self.ram[t2.wrapping_add(1)] = value[1];
+            }
+
+            // DEI(2)
+            0x16 => {
+                stack.update_stack_pointer(1, 1, keep_mode)?;
+                todo!();
+            }
+            0x36 => {
+                stack.update_stack_pointer(1, 2, keep_mode)?;
+                todo!();
+            }
+
+            // DEO(2)
+            0x17 => {
+                stack.update_stack_pointer(2, 0, keep_mode)?;
+                todo!();
+            }
+            0x37 => {
+                stack.update_stack_pointer(3, 0, keep_mode)?;
+                todo!();
+            }
+
+            // ADD(2)
+            0x18 => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, n.wrapping_add(t));
+            }
+            0x38 => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, n2.wrapping_add(t2));
+            }
+
+            // SUB(2)
+            0x19 => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, n.wrapping_sub(t));
+            }
+            0x39 => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, n2.wrapping_sub(t2));
+            }
+
+            // MUL(2)
+            0x1a => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, n.wrapping_mul(t));
+            }
+            0x3a => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, n2.wrapping_mul(t2));
+            }
+
+            // DIV(2)
+            0x1b => {
+                let quotient = n.checked_div(t).ok_or(UxnError::ZeroDiv)?;
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, quotient);
+            }
+            0x3b => {
+                let quotient = n2.checked_div(t2).ok_or(UxnError::ZeroDiv)?;
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, quotient);
+            }
+
+            // AND(2)
+            0x1c => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, n & t);
+            }
+            0x3c => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, n2 & t2);
+            }
+
+            // ORA(2)
+            0x1d => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, n | t);
+            }
+            0x3d => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, n2 | t2);
+            }
+
+            // EOR(2)
+            0x1e => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, n ^ t);
+            }
+            0x3e => {
+                stack.update_stack_pointer(4, 2, keep_mode)?;
+                stack.set2(1, n2 ^ t2);
+            }
+
+            // SFT(2)
+            0x1f => {
+                stack.update_stack_pointer(2, 1, keep_mode)?;
+                stack.set(1, (n >> (t & 0x0f)) << ((t & 0xf0) >> 4));
+            }
+            0x3f => {
+                stack.update_stack_pointer(3, 2, keep_mode)?;
+                stack.set2(1, (h2 >> (t & 0x0f)) << ((t & 0xf0) >> 4));
+            }
+
+            // Impossible.
+            _ => {
+                unreachable!();
+            }
+        }
+
+        Ok(false)
     }
 
-    pub fn run(&mut self) {
-        todo!();
+    pub fn run_vector(&mut self) -> Result<()> {
+        loop {
+            if self.step()? {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A simple RAM implementation for testing purposes. The reason for using a HashMap for
+    // addresses outside of the range of some vector is to allow the construction of TestRam
+    // directly from the output of uxnasm. In testing, reads to and writes from RAM are fairly
+    // uncommon, so this shouldn't substantially impact test performance.
+    struct TestRam {
+        program: Vec<u8>,
+        variables: std::collections::HashMap<u16, u8>,
+    }
+
+    impl std::ops::Index<u16> for TestRam {
+        type Output = u8;
+
+        fn index(&self, index: u16) -> &Self::Output {
+            self.program
+                .get((index - 0x0100) as usize)
+                .or_else(|| self.variables.get(&index))
+                .unwrap_or(&0x00)
+        }
+    }
+
+    impl std::ops::IndexMut<u16> for TestRam {
+        fn index_mut(&mut self, index: u16) -> &mut Self::Output {
+            self.program
+                .get_mut((index - 0x0100) as usize)
+                .unwrap_or_else(|| self.variables.entry(index).or_insert(0x00))
+        }
+    }
+
+    impl TestRam {
+        fn from_tal(tal: &str) -> Self {
+            let mut assembler = std::process::Command::new("uxnasm")
+                .args(["/dev/stdin", "/dev/stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("uxnasm is not installed");
+            std::io::Write::write(&mut assembler.stdin.take().unwrap(), tal.as_bytes()).unwrap();
+            let program = assembler.wait_with_output().unwrap().stdout;
+
+            TestRam {
+                program,
+                variables: std::collections::HashMap::new(),
+            }
+        }
+    }
+
+    // TODO: This is very much just a proof of concept test. More extensive tests will be added in
+    // the future.
+    #[test]
+    fn test_add() {
+        let mut cpu = Uxn::new(TestRam::from_tal("#01 #02 ADD"));
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws.get(1), 0x03);
     }
 }
