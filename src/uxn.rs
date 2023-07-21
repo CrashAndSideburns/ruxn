@@ -1,4 +1,7 @@
 use std::ops::IndexMut;
+use std::sync::mpsc::{channel, Receiver, Sender};
+
+use crate::devices::Device;
 
 type Result<T> = std::result::Result<T, UxnError>;
 
@@ -10,7 +13,7 @@ type Result<T> = std::result::Result<T, UxnError>;
 /// occurs in one of the stacks of the Uxn stack-machine. In particular, it is not detailed whether
 /// or not the *program counter* is allowed to underflow or overflow. This does not currently raise
 /// an error, but this is subject to change if the specification is clarified.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum UxnError {
     Underflow,
     Overflow,
@@ -38,6 +41,13 @@ impl UxnStack {
             s: [0x00; 0x100],
             sp: 0,
         }
+    }
+
+    pub fn pop(&mut self) -> Result<u8> {
+        let new_sp = self.sp.checked_sub(1).ok_or(UxnError::Underflow)?;
+        let value = unsafe { self.s.get_unchecked(new_sp as usize) };
+        self.sp = new_sp;
+        Ok(*value)
     }
 
     // TODO: Write proper documentation.
@@ -114,8 +124,10 @@ pub struct Uxn<T> {
     pub ws: UxnStack,
     pub rs: UxnStack,
 
-    // TODO: I'm not sure how I want devices to work for now. This is just a placeholder.
-    pub devices: [u8; 256],
+    vrx: Receiver<u16>,
+    vtx: Sender<u16>,
+
+    pub devices: [Option<Box<dyn Device>>; 16],
 }
 
 impl<T> Uxn<T>
@@ -123,14 +135,25 @@ where
     T: IndexMut<u16, Output = u8>,
 {
     pub fn new(ram: T) -> Self {
+        let (vtx, vrx) = channel();
         Uxn {
             ram,
             pc: 0x0100,
             ws: UxnStack::new(),
             rs: UxnStack::new(),
 
-            devices: [0x00; 256],
+            vrx,
+            vtx,
+
+            devices: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
         }
+    }
+
+    pub fn get_vector_queue_sender(&self) -> Sender<u16> {
+        self.vtx.clone()
     }
 
     fn step(&mut self) -> Result<bool> {
@@ -668,6 +691,7 @@ mod tests {
                 .args(["/dev/stdin", "/dev/stdout"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .expect("uxnasm is not installed");
             std::io::Write::write(&mut assembler.stdin.take().unwrap(), tal.as_bytes()).unwrap();
@@ -686,6 +710,6 @@ mod tests {
     fn test_add() {
         let mut cpu = Uxn::new(TestRam::from_tal("#01 #02 ADD"));
         cpu.run_vector().unwrap();
-        assert_eq!(cpu.ws.get(1), 0x03);
+        assert_eq!(cpu.ws.pop(), Ok(0x03));
     }
 }
