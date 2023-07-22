@@ -43,13 +43,6 @@ impl UxnStack {
         }
     }
 
-    pub fn pop(&mut self) -> Result<u8> {
-        let new_sp = self.sp.checked_sub(1).ok_or(UxnError::Underflow)?;
-        let value = unsafe { self.s.get_unchecked(new_sp as usize) };
-        self.sp = new_sp;
-        Ok(*value)
-    }
-
     // TODO: Write proper documentation.
     fn update_stack_pointer(
         &mut self,
@@ -671,7 +664,7 @@ mod tests {
 
         fn index(&self, index: u16) -> &Self::Output {
             self.program
-                .get((index - 0x0100) as usize)
+                .get(index.wrapping_sub(0x0100) as usize)
                 .or_else(|| self.variables.get(&index))
                 .unwrap_or(&0x00)
         }
@@ -680,7 +673,7 @@ mod tests {
     impl std::ops::IndexMut<u16> for TestRam {
         fn index_mut(&mut self, index: u16) -> &mut Self::Output {
             self.program
-                .get_mut((index - 0x0100) as usize)
+                .get_mut(index.wrapping_sub(0x0100) as usize)
                 .unwrap_or_else(|| self.variables.entry(index).or_insert(0x00))
         }
     }
@@ -704,12 +697,364 @@ mod tests {
         }
     }
 
-    // TODO: This is very much just a proof of concept test. More extensive tests will be added in
-    // the future.
+    impl std::cmp::PartialEq<Vec<u8>> for UxnStack {
+        fn eq(&self, other: &Vec<u8>) -> bool {
+            self.s[..self.sp as usize].to_vec() == *other
+        }
+    }
+
+    impl Uxn<TestRam> {
+        fn from_tal(tal: &str) -> Self {
+            Uxn::new(TestRam::from_tal(tal))
+        }
+    }
+
     #[test]
-    fn test_add() {
-        let mut cpu = Uxn::new(TestRam::from_tal("#01 #02 ADD"));
+    fn brk() {}
+
+    #[test]
+    fn jci() {}
+
+    #[test]
+    fn jmi() {}
+
+    #[test]
+    fn jsi() {}
+
+    #[test]
+    fn lit() {
+        let mut cpu = Uxn::from_tal("LIT 12");
         cpu.run_vector().unwrap();
-        assert_eq!(cpu.ws.pop(), Ok(0x03));
+        assert_eq!(cpu.ws, vec![0x12]);
+
+        let mut cpu = Uxn::from_tal("LIT2 abcd");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab, 0xcd]);
+    }
+
+    #[test]
+    fn inc() {
+        let mut cpu = Uxn::from_tal("#01 INC");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x02]);
+
+        let mut cpu = Uxn::from_tal("#0001 INC2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00, 0x02]);
+
+        let mut cpu = Uxn::from_tal("#0001 INC2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00, 0x01, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn pop() {
+        let mut cpu = Uxn::from_tal("#1234 POP");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 POP2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![]);
+
+        let mut cpu = Uxn::from_tal("#1234 POP2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34]);
+    }
+
+    #[test]
+    fn nip() {
+        let mut cpu = Uxn::from_tal("#1234 NIP");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x34]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 NIP2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x56, 0x78]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 NIP2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x56, 0x78, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn swp() {
+        let mut cpu = Uxn::from_tal("#1234 SWP");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x34, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 SWPk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x34, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 SWP2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x56, 0x78, 0x12, 0x34]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 SWP2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x56, 0x78, 0x56, 0x78, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn rot() {
+        let mut cpu = Uxn::from_tal("#1234 #56 ROT");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x34, 0x56, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 #56 ROTk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x56, 0x34, 0x56, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 #9abc ROT2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x56, 0x78, 0x9a, 0xbc, 0x12, 0x34]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 #9abc ROT2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0x56, 0x78, 0x9a, 0xbc, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn dup() {
+        let mut cpu = Uxn::from_tal("#1234 DUP");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x34]);
+
+        let mut cpu = Uxn::from_tal("#12 DUPk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x12, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 DUP2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn ovr() {
+        let mut cpu = Uxn::from_tal("#1234 OVR");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 OVRk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x12, 0x34, 0x12]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 OVR2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x56, 0x78, 0x12, 0x34]);
+
+        let mut cpu = Uxn::from_tal("#1234 #5678 OVR2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn equ() {
+        let mut cpu = Uxn::from_tal("#1212 EQU");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x01]);
+
+        let mut cpu = Uxn::from_tal("#1234 EQUk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x00]);
+
+        let mut cpu = Uxn::from_tal("#abcd #ef01 EQU2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00]);
+
+        let mut cpu = Uxn::from_tal("#abcd #abcd EQU2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab, 0xcd, 0xab, 0xcd, 0x01]);
+    }
+
+    #[test]
+    fn neq() {
+        let mut cpu = Uxn::from_tal("#1212 NEQ");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00]);
+
+        let mut cpu = Uxn::from_tal("#1234 NEQk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x01]);
+
+        let mut cpu = Uxn::from_tal("#abcd #ef01 NEQ2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x01]);
+
+        let mut cpu = Uxn::from_tal("#abcd #abcd NEQ2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab, 0xcd, 0xab, 0xcd, 0x00]);
+    }
+
+    #[test]
+    fn gth() {
+        let mut cpu = Uxn::from_tal("#1234 GTH");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00]);
+
+        let mut cpu = Uxn::from_tal("#3412 GTHk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x34, 0x12, 0x01]);
+
+        let mut cpu = Uxn::from_tal("#3456 #1234 GTH2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x01]);
+
+        let mut cpu = Uxn::from_tal("#1234 #3456 GTH2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x34, 0x34, 0x56, 0x00]);
+    }
+
+    #[test]
+    fn lth() {
+        let mut cpu = Uxn::from_tal("#0101 LTH");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00]);
+
+        let mut cpu = Uxn::from_tal("#0100 LTHk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x01, 0x00, 0x00]);
+
+        let mut cpu = Uxn::from_tal("#0001 #0000 LTH2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00]);
+
+        let mut cpu = Uxn::from_tal("#0001 #0000 LTH2k");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00, 0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn jmp() {
+        let mut cpu = Uxn::from_tal(",&skip-rel JMP BRK &skip-rel #01");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x01]);
+    }
+
+    #[test]
+    fn jcn() {
+        let mut cpu = Uxn::from_tal("#abcd #01 ,&pass JCN SWP &pass POP");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab]);
+
+        let mut cpu = Uxn::from_tal("#abcd #00 ,&fail JCN SWP &fail POP");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xcd]);
+    }
+
+    #[test]
+    fn jsr() {
+        let mut cpu = Uxn::from_tal(",&get JSR #01 BRK &get #02 JMP2r");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x02, 0x01]);
+    }
+    
+    #[test]
+    fn sth() {
+        let mut cpu = Uxn::from_tal("#01 STH LITr 02 ADDr STHr");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x03]);
+    }
+
+    #[test]
+    fn ldz() {
+        let mut cpu = Uxn::from_tal("|00 @cell $2 |0100 .cell LDZ");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00]);
+    }
+
+    #[test]
+    fn stz() {
+        let mut cpu = Uxn::from_tal("|00 @cell $2 |0100 #abcd .cell STZ2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ram[0x0000], 0xab);
+        assert_eq!(cpu.ram[0x0001], 0xcd);
+    }
+
+    #[test]
+    fn ldr() {
+        let mut cpu = Uxn::from_tal(",cell LDR2 BRK @cell abcd");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab, 0xcd]);
+    }
+
+    #[test]
+    fn str() {
+        let mut cpu = Uxn::from_tal("#1234 ,cell STR2 BRK @cell $2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![]);
+    }
+
+    #[test]
+    fn lda() {
+        let mut cpu = Uxn::from_tal(";cell LDA BRK @cell abcd");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab]);
+    }
+
+    #[test]
+    fn sta() {
+        let mut cpu = Uxn::from_tal("#abcd ;cell STA BRK @cell $1");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0xab]);
+    }
+
+    #[test]
+    fn dei() {}
+
+    #[test]
+    fn deo() {}
+
+    #[test]
+    fn add() {
+        let mut cpu = Uxn::from_tal("#1a #2e ADD");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x48]);
+
+        let mut cpu = Uxn::from_tal("#02 #5d ADDk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x02, 0x5d, 0x5f]);
+
+        let mut cpu = Uxn::from_tal("#0001 #0002 ADD2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x00, 0x03]);
+    }
+
+    #[test]
+    fn sub() {}
+
+    #[test]
+    fn mul() {}
+
+    #[test]
+    fn div() {}
+
+    #[test]
+    fn and() {}
+
+    #[test]
+    fn ora() {}
+
+    #[test]
+    fn eor() {}
+
+    #[test]
+    fn sft() {
+        let mut cpu = Uxn::from_tal("#34 #10 SFT");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x68]);
+
+        let mut cpu = Uxn::from_tal("#34 #01 SFT");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x1a]);
+
+        let mut cpu = Uxn::from_tal("#34 #33 SFTk");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x34, 0x33, 0x30]);
+
+        let mut cpu = Uxn::from_tal("#1248 #34 SFTk2");
+        cpu.run_vector().unwrap();
+        assert_eq!(cpu.ws, vec![0x12, 0x48, 0x34, 0x09, 0x20]);
     }
 }
