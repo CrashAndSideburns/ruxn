@@ -527,21 +527,36 @@ where
             // DEI(2)
             0x16 => {
                 stack.update_stack_pointer(1, 1, keep_mode)?;
-                todo!();
+                if let Some(device) = &mut self.devices[((t & 0xf0) >> 4) as usize] {
+                    stack.set(1, device.read_byte(t & 0x0f));
+                } else {
+                    // FIXME: This is kind of a lazy placeholder. I'm not totally sure how I want
+                    // this to work yet.
+                    stack.set(1, 0x00);
+                }
             }
             0x36 => {
                 stack.update_stack_pointer(1, 2, keep_mode)?;
-                todo!();
+                if let Some(device) = &mut self.devices[((t & 0xf0) >> 4) as usize] {
+                    stack.set2(1, device.read_short(t & 0x0f));
+                } else {
+                    stack.set2(1, 0x0000);
+                }
             }
 
             // DEO(2)
             0x17 => {
                 stack.update_stack_pointer(2, 0, keep_mode)?;
-                todo!();
+                stack.update_stack_pointer(1, 1, keep_mode)?;
+                if let Some(device) = &mut self.devices[((t & 0xf0) >> 4) as usize] {
+                    device.write_byte(t & 0x0f, n);
+                }
             }
             0x37 => {
                 stack.update_stack_pointer(3, 0, keep_mode)?;
-                todo!();
+                if let Some(device) = &mut self.devices[((t & 0xf0) >> 4) as usize] {
+                    device.write_short(t & 0x0f, h2);
+                }
             }
 
             // ADD(2)
