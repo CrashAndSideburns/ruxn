@@ -74,7 +74,7 @@ impl UxnStack {
     }
 
     // TODO: Write proper documentation.
-    fn get(&self, offset: u8) -> u8 {
+    fn get_byte(&self, offset: u8) -> u8 {
         unsafe {
             // This never fails, because the index is guaranteed to be in the range 0..=255.
             *self.s.get_unchecked(self.sp.wrapping_sub(offset) as usize)
@@ -82,14 +82,14 @@ impl UxnStack {
     }
 
     // TODO: Write proper documentation.
-    fn get2(&self, offset: u8) -> u16 {
-        let msb = self.get(offset.wrapping_add(1));
-        let lsb = self.get(offset);
+    fn get_short(&self, offset: u8) -> u16 {
+        let msb = self.get_byte(offset.wrapping_add(1));
+        let lsb = self.get_byte(offset);
         u16::from_be_bytes([msb, lsb])
     }
 
     // TODO: Write proper documentation.
-    fn set(&mut self, offset: u8, value: u8) {
+    fn set_byte(&mut self, offset: u8, value: u8) {
         unsafe {
             *self
                 .s
@@ -98,12 +98,12 @@ impl UxnStack {
     }
 
     // TODO: Write proper documentation.
-    fn set2(&mut self, offset: u8, value: u16) {
+    fn set_short(&mut self, offset: u8, value: u16) {
         let value = value.to_be_bytes();
         let msb = value[0];
         let lsb = value[1];
-        self.set(offset.wrapping_add(1), msb);
-        self.set(offset, lsb);
+        self.set_byte(offset.wrapping_add(1), msb);
+        self.set_byte(offset, lsb);
     }
 
     // TODO: UxnStack should probably have a saner set of methods. Someone using the Uxn struct may
@@ -182,13 +182,13 @@ where
         // taken from the reference Uxn implementation at
         // https://git.sr.ht/~rabbits/uxn11/blob/main/src/uxn.c.
         // FIXME: These variable names should be changed at some point. They are not good.
-        let t = stack.get(1);
-        let n = stack.get(2);
-        let l = stack.get(3);
-        let h2 = stack.get2(2);
-        let t2 = stack.get2(1);
-        let n2 = stack.get2(3);
-        let l2 = stack.get2(5);
+        let t = stack.get_byte(1);
+        let n = stack.get_byte(2);
+        let l = stack.get_byte(3);
+        let h2 = stack.get_short(2);
+        let t2 = stack.get_short(1);
+        let n2 = stack.get_short(3);
+        let l2 = stack.get_short(5);
 
         // HACK: There are definitely some things here that could be tidier.
         match masked_instruction {
@@ -224,14 +224,14 @@ where
                 let lsb = self.ram[self.pc.wrapping_add(1)];
                 self.pc = self.pc.wrapping_add(2);
                 self.rs.update_stack_pointer(0, 2, false)?;
-                self.rs.set2(1, self.pc);
+                self.rs.set_short(1, self.pc);
                 self.pc = self.pc.wrapping_add(u16::from_be_bytes([msb, lsb]));
             }
 
             // LIT
             0x80 => {
                 stack.update_stack_pointer(0, 1, true)?;
-                stack.set(1, self.ram[self.pc]);
+                stack.set_byte(1, self.ram[self.pc]);
                 self.pc = self.pc.wrapping_add(1);
             }
 
@@ -240,14 +240,14 @@ where
                 stack.update_stack_pointer(0, 2, true)?;
                 let msb = self.ram[self.pc];
                 let lsb = self.ram[self.pc.wrapping_add(1)];
-                stack.set2(1, u16::from_be_bytes([msb, lsb]));
+                stack.set_short(1, u16::from_be_bytes([msb, lsb]));
                 self.pc = self.pc.wrapping_add(2);
             }
 
             // LITr
             0xc0 => {
                 stack.update_stack_pointer(0, 1, true)?;
-                stack.set(1, self.ram[self.pc]);
+                stack.set_byte(1, self.ram[self.pc]);
                 self.pc = self.pc.wrapping_add(1);
             }
 
@@ -256,7 +256,7 @@ where
                 stack.update_stack_pointer(0, 2, true)?;
                 let msb = self.ram[self.pc];
                 let lsb = self.ram[self.pc.wrapping_add(1)];
-                stack.set2(1, u16::from_be_bytes([msb, lsb]));
+                stack.set_short(1, u16::from_be_bytes([msb, lsb]));
                 self.pc = self.pc.wrapping_add(2);
             }
 
@@ -265,11 +265,11 @@ where
             // INC(2)
             0x01 => {
                 stack.update_stack_pointer(1, 1, keep_mode)?;
-                stack.set(1, t + 1);
+                stack.set_byte(1, t + 1);
             }
             0x21 => {
                 stack.update_stack_pointer(2, 2, keep_mode)?;
-                stack.set2(1, t2 + 1);
+                stack.set_short(1, t2 + 1);
             }
 
             // POP(2)
@@ -283,103 +283,103 @@ where
             // NIP(2)
             0x03 => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, t);
+                stack.set_byte(1, t);
             }
             0x23 => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, t2);
+                stack.set_short(1, t2);
             }
 
             // SWP(2)
             0x04 => {
                 stack.update_stack_pointer(2, 2, keep_mode)?;
-                stack.set(1, n);
-                stack.set(2, t);
+                stack.set_byte(1, n);
+                stack.set_byte(2, t);
             }
             0x24 => {
                 stack.update_stack_pointer(4, 4, keep_mode)?;
-                stack.set2(1, n2);
-                stack.set2(3, t2);
+                stack.set_short(1, n2);
+                stack.set_short(3, t2);
             }
 
             // ROT(2)
             0x05 => {
                 stack.update_stack_pointer(3, 3, keep_mode)?;
-                stack.set(1, l);
-                stack.set(2, t);
-                stack.set(3, n);
+                stack.set_byte(1, l);
+                stack.set_byte(2, t);
+                stack.set_byte(3, n);
             }
             0x25 => {
                 stack.update_stack_pointer(6, 6, keep_mode)?;
-                stack.set2(1, l2);
-                stack.set2(3, t2);
-                stack.set2(5, n2);
+                stack.set_short(1, l2);
+                stack.set_short(3, t2);
+                stack.set_short(5, n2);
             }
 
             // DUP(2)
             0x06 => {
                 stack.update_stack_pointer(1, 2, keep_mode)?;
-                stack.set(1, t);
-                stack.set(2, t);
+                stack.set_byte(1, t);
+                stack.set_byte(2, t);
             }
             0x26 => {
                 stack.update_stack_pointer(2, 4, keep_mode)?;
-                stack.set2(1, t2);
-                stack.set2(3, t2);
+                stack.set_short(1, t2);
+                stack.set_short(3, t2);
             }
 
             // OVR(2)
             0x07 => {
                 stack.update_stack_pointer(2, 3, keep_mode)?;
-                stack.set(1, n);
-                stack.set(2, t);
-                stack.set(3, n);
+                stack.set_byte(1, n);
+                stack.set_byte(2, t);
+                stack.set_byte(3, n);
             }
             0x27 => {
                 stack.update_stack_pointer(4, 6, keep_mode)?;
-                stack.set2(1, n2);
-                stack.set2(3, t2);
-                stack.set2(5, n2);
+                stack.set_short(1, n2);
+                stack.set_short(3, t2);
+                stack.set_short(5, n2);
             }
 
             // EQU(2)
             0x08 => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, (n == t).into());
+                stack.set_byte(1, (n == t).into());
             }
             0x28 => {
                 stack.update_stack_pointer(4, 1, keep_mode)?;
-                stack.set(1, (n2 == t2).into());
+                stack.set_byte(1, (n2 == t2).into());
             }
 
             // NEQ(2)
             0x09 => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, (n != t).into());
+                stack.set_byte(1, (n != t).into());
             }
             0x29 => {
                 stack.update_stack_pointer(4, 1, keep_mode)?;
-                stack.set(1, (n2 != t2).into());
+                stack.set_byte(1, (n2 != t2).into());
             }
 
             // GTH(2)
             0x0a => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, (n > t).into());
+                stack.set_byte(1, (n > t).into());
             }
             0x2a => {
                 stack.update_stack_pointer(4, 1, keep_mode)?;
-                stack.set(1, (n2 > t2).into());
+                stack.set_byte(1, (n2 > t2).into());
             }
 
             // LTH(2)
             0x0b => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, (n < t).into());
+                stack.set_byte(1, (n < t).into());
             }
             0x2b => {
                 stack.update_stack_pointer(4, 1, keep_mode)?;
-                stack.set(1, (n2 < t2).into());
+                stack.set_byte(1, (n2 < t2).into());
             }
 
             // JMP(2)
@@ -410,13 +410,13 @@ where
             0x0e => {
                 stack.update_stack_pointer(1, 0, keep_mode)?;
                 self.rs.update_stack_pointer(0, 2, false)?;
-                self.rs.set2(1, self.pc);
+                self.rs.set_short(1, self.pc);
                 self.pc = self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into());
             }
             0x2e => {
                 stack.update_stack_pointer(2, 0, keep_mode)?;
                 self.rs.update_stack_pointer(0, 2, false)?;
-                self.rs.set2(1, self.pc);
+                self.rs.set_short(1, self.pc);
                 self.pc = t2
             }
 
@@ -429,7 +429,7 @@ where
                     &mut self.rs
                 };
                 other_stack.update_stack_pointer(0, 1, false)?;
-                other_stack.set(1, t);
+                other_stack.set_byte(1, t);
             }
             0x2f => {
                 stack.update_stack_pointer(2, 0, keep_mode)?;
@@ -439,18 +439,18 @@ where
                     &mut self.rs
                 };
                 other_stack.update_stack_pointer(0, 2, false)?;
-                other_stack.set2(1, t2);
+                other_stack.set_short(1, t2);
             }
 
             // LDZ(2)
             0x10 => {
                 stack.update_stack_pointer(1, 1, keep_mode)?;
-                stack.set(1, self.ram[t.into()]);
+                stack.set_byte(1, self.ram[t.into()]);
             }
             0x30 => {
                 stack.update_stack_pointer(1, 2, keep_mode)?;
-                stack.set(1, self.ram[t.wrapping_add(1).into()]);
-                stack.set(2, self.ram[t.into()]);
+                stack.set_byte(1, self.ram[t.wrapping_add(1).into()]);
+                stack.set_byte(2, self.ram[t.into()]);
             }
 
             // STZ(2)
@@ -467,21 +467,21 @@ where
             // LDR(2)
             0x12 => {
                 stack.update_stack_pointer(1, 1, keep_mode)?;
-                stack.set(
+                stack.set_byte(
                     1,
                     self.ram[self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into())],
                 );
             }
             0x32 => {
                 stack.update_stack_pointer(1, 2, keep_mode)?;
-                stack.set(
+                stack.set_byte(
                     1,
                     self.ram[self
                         .pc
                         .wrapping_add_signed(i8::from_be_bytes([t]).into())
                         .wrapping_add(1)],
                 );
-                stack.set(
+                stack.set_byte(
                     2,
                     self.ram[self.pc.wrapping_add_signed(i8::from_be_bytes([t]).into())],
                 );
@@ -504,12 +504,12 @@ where
             // LDA(2)
             0x14 => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, self.ram[t2]);
+                stack.set_byte(1, self.ram[t2]);
             }
             0x34 => {
                 stack.update_stack_pointer(2, 2, keep_mode)?;
-                stack.set(1, self.ram[t2.wrapping_add(1)]);
-                stack.set(2, self.ram[t2]);
+                stack.set_byte(1, self.ram[t2.wrapping_add(1)]);
+                stack.set_byte(2, self.ram[t2]);
             }
 
             // STA(2)
@@ -528,19 +528,19 @@ where
             0x16 => {
                 stack.update_stack_pointer(1, 1, keep_mode)?;
                 if let Some(device) = &mut self.devices[((t & 0xf0) >> 4) as usize] {
-                    stack.set(1, device.read_byte(t & 0x0f));
+                    stack.set_byte(1, device.read_byte(t & 0x0f));
                 } else {
                     // FIXME: This is kind of a lazy placeholder. I'm not totally sure how I want
                     // this to work yet.
-                    stack.set(1, 0x00);
+                    stack.set_byte(1, 0x00);
                 }
             }
             0x36 => {
                 stack.update_stack_pointer(1, 2, keep_mode)?;
                 if let Some(device) = &mut self.devices[((t & 0xf0) >> 4) as usize] {
-                    stack.set2(1, device.read_short(t & 0x0f));
+                    stack.set_short(1, device.read_short(t & 0x0f));
                 } else {
-                    stack.set2(1, 0x0000);
+                    stack.set_short(1, 0x0000);
                 }
             }
 
@@ -562,83 +562,83 @@ where
             // ADD(2)
             0x18 => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, n.wrapping_add(t));
+                stack.set_byte(1, n.wrapping_add(t));
             }
             0x38 => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, n2.wrapping_add(t2));
+                stack.set_short(1, n2.wrapping_add(t2));
             }
 
             // SUB(2)
             0x19 => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, n.wrapping_sub(t));
+                stack.set_byte(1, n.wrapping_sub(t));
             }
             0x39 => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, n2.wrapping_sub(t2));
+                stack.set_short(1, n2.wrapping_sub(t2));
             }
 
             // MUL(2)
             0x1a => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, n.wrapping_mul(t));
+                stack.set_byte(1, n.wrapping_mul(t));
             }
             0x3a => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, n2.wrapping_mul(t2));
+                stack.set_short(1, n2.wrapping_mul(t2));
             }
 
             // DIV(2)
             0x1b => {
                 let quotient = n.checked_div(t).ok_or(UxnError::ZeroDiv)?;
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, quotient);
+                stack.set_byte(1, quotient);
             }
             0x3b => {
                 let quotient = n2.checked_div(t2).ok_or(UxnError::ZeroDiv)?;
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, quotient);
+                stack.set_short(1, quotient);
             }
 
             // AND(2)
             0x1c => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, n & t);
+                stack.set_byte(1, n & t);
             }
             0x3c => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, n2 & t2);
+                stack.set_short(1, n2 & t2);
             }
 
             // ORA(2)
             0x1d => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, n | t);
+                stack.set_byte(1, n | t);
             }
             0x3d => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, n2 | t2);
+                stack.set_short(1, n2 | t2);
             }
 
             // EOR(2)
             0x1e => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, n ^ t);
+                stack.set_byte(1, n ^ t);
             }
             0x3e => {
                 stack.update_stack_pointer(4, 2, keep_mode)?;
-                stack.set2(1, n2 ^ t2);
+                stack.set_short(1, n2 ^ t2);
             }
 
             // SFT(2)
             0x1f => {
                 stack.update_stack_pointer(2, 1, keep_mode)?;
-                stack.set(1, (n >> (t & 0x0f)) << ((t & 0xf0) >> 4));
+                stack.set_byte(1, (n >> (t & 0x0f)) << ((t & 0xf0) >> 4));
             }
             0x3f => {
                 stack.update_stack_pointer(3, 2, keep_mode)?;
-                stack.set2(1, (h2 >> (t & 0x0f)) << ((t & 0xf0) >> 4));
+                stack.set_short(1, (h2 >> (t & 0x0f)) << ((t & 0xf0) >> 4));
             }
 
             // Impossible.
