@@ -2,9 +2,9 @@
 name = "ruxn"
 version = "0.1.0"
 authors = ["Morgan Arnold <morgan.arnold@proton.me>"]
-edition = "2021"
-description = "An implementation of the Uxn virtual machine written in Rust."
-repository = "https://github.com/CrashAndSideburns/ruxn"
+description = "An implementation of the Uxn stack-machine written in Rust."
+categories = ["emulators"]
+keywords = ["uxn", "varvara"]
+repository = "https://git.sr.ht/~mra/ruxn"
 license = "Unlicense"
-
-[dependencies]
+edition = "2021"
